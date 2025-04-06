@@ -17,8 +17,8 @@ if file:
         file_buffer = BytesIO(file_content)
 
         # Read both DataFrames from the same buffer
-        data_objects_df = pd.read_xml(BytesIO(file_content), xpath=".//DataObjects")[["ObjectID", "Name", "Description"]]
-        exception_metadata_df = pd.read_xml(BytesIO(file_content), xpath=".//ExceptionMetadata")[["ObjectID", "CorrectiveAction"]]
+        data_objects_df = pd.read_xml(BytesIO(file_content), xpath=".//DataObjects", parser="etree")[["ObjectID", "Name", "Description"]]
+        exception_metadata_df = pd.read_xml(BytesIO(file_content), xpath=".//ExceptionMetadata", parser="etree")[["ObjectID", "CorrectiveAction"]]
 
         # Merge both sections
         merged_df = pd.merge(data_objects_df, exception_metadata_df, on="ObjectID", how="outer")
