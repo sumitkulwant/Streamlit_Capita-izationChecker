@@ -24,7 +24,8 @@ if file:
         merged_df = pd.merge(data_objects_df, exception_metadata_df, on="ObjectID", how="outer")
 
         # Regex to match lowercase words starting after space, /, -, or (
-        pattern = r"((?:\s|-|/|\()[a-z]\w*)"
+        #pattern = r"((?:\s|-|/|\()[a-z]\w*)"
+        pattern = r'((?:\s|-|/|\(|"|\'\')[a-z]\w*)'
         regex = re.compile(pattern)
 
         # Dictionary to map matched words to their ObjectIDs
