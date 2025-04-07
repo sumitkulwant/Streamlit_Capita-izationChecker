@@ -25,7 +25,9 @@ if file:
 
         # Regex to match lowercase words starting after space, /, -, or (
         #pattern = r"((?:\s|-|/|\()[a-z]\w*)"
+        #pattern = r'((?:\s|-|/|\(|"|\'\')[a-z]\w*)'
         pattern = r'((?:\s|-|/|\(|"|\'\')[a-z]\w*)'
+
         regex = re.compile(pattern)
 
         # Dictionary to map matched words to their ObjectIDs
