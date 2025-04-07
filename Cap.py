@@ -44,7 +44,8 @@ if file:
                 if pd.notna(text):
                     matches = regex.findall(text)
                     for match in matches:
-                        cleaned_word = match.strip()
+                        #cleaned_word = match.strip()
+                        cleaned_word = match.strip(" '\"")
                         word_to_object_ids[cleaned_word].add(object_id)
 
         # Convert the results into a DataFrame
