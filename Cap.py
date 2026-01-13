@@ -1,67 +1,114 @@
-import pandas as pd
+import gradio as gr
+from lxml import etree
+from groq import Groq
 import re
-from collections import defaultdict
-import streamlit as st
-from io import BytesIO
+import os
 
-st.set_page_config(page_title="Capitalization Checker", layout="wide")
-st.title("📝 Capitalization Checker in XML")
+# ================================
+# Configuration
+# ================================
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+client = Groq(api_key=GROQ_API_KEY)
+XML_FILE = "data_dictionary.xml"
 
-# File uploader
-file = st.file_uploader("📂 Upload an XML file", type=["xml"])
+# Load XML
+tree = etree.parse(XML_FILE)
+root = tree.getroot()
 
-if file:
-    try:
-        # Read the uploaded file content once
-        file_content = file.read()
-        file_buffer = BytesIO(file_content)
+# ================================
+# Query Functions
+# ================================
+def get_all_bustypes():
+    bustypes = set(root.xpath('//@BusType'))
+    return sorted(bustypes)
 
-        # Read both DataFrames from the same buffer
-        data_objects_df = pd.read_xml(BytesIO(file_content), xpath=".//DataObjects", parser="etree")[["ObjectID", "Name", "Description"]]
-        exception_metadata_df = pd.read_xml(BytesIO(file_content), xpath=".//ExceptionMetadata", parser="etree")[["ObjectID", "CorrectiveAction"]]
+def get_elements_by_bustype(bustype):
+    return root.xpath(f'//*[@BusType="{bustype}"]')
 
-        # Merge both sections
-        merged_df = pd.merge(data_objects_df, exception_metadata_df, on="ObjectID", how="outer")
+def element_to_string(elem):
+    return etree.tostring(elem, pretty_print=True, encoding='unicode')
 
-        # Regex to match lowercase words starting after space, /, -, or (
-        #pattern = r"((?:\s|-|/|\()[a-z]\w*)"
-        #pattern = r'((?:\s|-|/|\(|"|\'\')[a-z]\w*)'
-        #pattern = r'((?:\s|-|/|\(|"|\'\')[a-z]\w*)'
-        pattern = r"((?:\s|-|/|\(|\"|')[a-z]\w*)"
+def ask_llm(context, question):
+    prompt = f"""You are a CAN Data Dictionary expert.
+Answer based ONLY on this XML context:
 
-        regex = re.compile(pattern)
+{context}
 
-        # Dictionary to map matched words to their ObjectIDs
-        word_to_object_ids = defaultdict(set)
+Question: {question}"""
+    
+    chat = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=1000
+    )
+    
+    return chat.choices[0].message.content
 
-        # Columns to check
-        columns_to_check = ["Name", "Description", "CorrectiveAction"]
+def handle_query(question):
+    q_lower = question.lower()
+    
+    # Count BusTypes
+    if "how many" in q_lower and "bustype" in q_lower:
+        bustypes = get_all_bustypes()
+        return f"✅ Found {len(bustypes)} unique BusTypes"
+    
+    # List BusTypes
+    if ("list" in q_lower or "show all" in q_lower) and "bustype" in q_lower:
+        bustypes = get_all_bustypes()
+        return f"All {len(bustypes)} BusTypes:\n{', '.join(bustypes)}"
+    
+    # Specific BusType
+    match = re.search(r'bustype[:\s]+(\d+)', q_lower)
+    if match:
+        bustype = match.group(1)
+        elements = get_elements_by_bustype(bustype)
+        if not elements:
+            return f"❌ BusType {bustype} not found"
+        
+        result = f"✅ Found {len(elements)} elements with BusType={bustype}\n\n"
+        for elem in elements[:3]:
+            result += element_to_string(elem) + "\n" + "="*50 + "\n"
+        
+        if len(elements) > 3:
+            result += f"\n... and {len(elements) - 3} more elements"
+        
+        return result
+    
+    # Fallback to LLM
+    return "Please ask about BusTypes, PGNs, or specific signals."
 
-        # Loop through the DataFrame and extract matches
-        for _, row in merged_df.iterrows():
-            object_id = str(row["ObjectID"])
-            for col in columns_to_check:
-                text = row.get(col)
-                if pd.notna(text):
-                    matches = regex.findall(text)
-                    for match in matches:
-                        cleaned_word = match.strip()
-                        #cleaned_word = match.strip(" '\"")
-                        word_to_object_ids[cleaned_word].add(object_id)
+# ================================
+# Gradio Interface
+# ================================
+with gr.Blocks(title="CAN Data Dictionary AI") as demo:
+    gr.Markdown("# 🚗 CAN Data Dictionary AI")
+    gr.Markdown("Ask questions about your XML data dictionary!")
+    
+    with gr.Row():
+        with gr.Column(scale=2):
+            query = gr.Textbox(
+                label="Your Question",
+                placeholder="e.g., How many BusTypes are present?",
+                lines=2
+            )
+            search_btn = gr.Button("🔍 Search", variant="primary")
+        
+        with gr.Column(scale=1):
+            gr.Markdown("### 💡 Examples")
+            gr.Examples(
+                examples=[
+                    "How many BusTypes are present?",
+                    "List all BusTypes",
+                    "Show BusType 38",
+                    "What's in BusType 47?"
+                ],
+                inputs=query
+            )
+    
+    output = gr.Textbox(label="Answer", lines=15)
+    
+    search_btn.click(fn=handle_query, inputs=query, outputs=output)
+    query.submit(fn=handle_query, inputs=query, outputs=output)
 
-        # Convert the results into a DataFrame
-        output_df = pd.DataFrame([
-            {"Word": word, "ObjectIDs": ", ".join(sorted(word_to_object_ids[word]))}
-            for word in sorted(word_to_object_ids)
-        ])
-
-        if not output_df.empty:
-            st.success(f"✅ Found {len(output_df)} unique lowercase issues.")
-            st.dataframe(output_df, use_container_width=True)
-        else:
-            st.info("🎉 No lowercase capitalization issues found!")
-
-    except Exception as e:
-        st.error(f"❌ Error parsing file: {e}")
-else:
-    st.warning("📄 Please upload an XML file to begin.")
+demo.launch()
