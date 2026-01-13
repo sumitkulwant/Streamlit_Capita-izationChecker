@@ -14,65 +14,77 @@ st.set_page_config(
 )
 
 # ================================
-# Load XML (Cached)
+# Initialize Session State
 # ================================
-@st.cache_resource
-def load_xml(xml_file):
-    """Load and cache XML in memory"""
-    try:
-        tree = etree.parse(xml_file)
-        root = tree.getroot()
-        return tree, root
-    except Exception as e:
-        st.error(f"Error loading XML: {e}")
-        return None, None
+if 'xml_loaded' not in st.session_state:
+    st.session_state.xml_loaded = False
+if 'root' not in st.session_state:
+    st.session_state.root = None
+if 'diag_index' not in st.session_state:
+    st.session_state.diag_index = None
+if 'history' not in st.session_state:
+    st.session_state.history = []
+if 'query' not in st.session_state:
+    st.session_state.query = ''
+if 'should_search' not in st.session_state:
+    st.session_state.should_search = False
 
-# Check for XML file
-XML_FILE = "data_dictionary.xml"
-if not os.path.exists(XML_FILE):
-    st.error(f"❌ XML file '{XML_FILE}' not found!")
-    uploaded_file = st.file_uploader("Upload your data_dictionary.xml", type=['xml'])
-    if uploaded_file:
-        with open(XML_FILE, 'wb') as f:
-            f.write(uploaded_file.getbuffer())
-        st.success("✅ XML uploaded! Reloading...")
-        st.rerun()
-    st.stop()
+# ================================
+# File Upload Section
+# ================================
+st.title("🚗 Vehicle Diagnostic System Query")
 
-with st.spinner("🔄 Loading Vehicle Diagnostic Data..."):
-    tree, root = load_xml(XML_FILE)
-
-if root is None:
-    st.error("Failed to load XML. Please check the file format.")
-    st.stop()
+if not st.session_state.xml_loaded:
+    st.markdown("### 📁 Upload Your XML Data Dictionary")
+    st.info("Upload your vehicle diagnostic XML file to begin querying.")
+    
+    uploaded_file = st.file_uploader(
+        "Choose an XML file",
+        type=['xml'],
+        help="Upload your data_dictionary.xml file"
+    )
+    
+    if uploaded_file is not None:
+        try:
+            with st.spinner("🔄 Loading XML file..."):
+                # Parse XML from uploaded file
+                tree = etree.parse(uploaded_file)
+                st.session_state.root = tree.getroot()
+                st.session_state.xml_loaded = True
+                st.success("✅ XML file loaded successfully!")
+                st.rerun()
+        except Exception as e:
+            st.error(f"❌ Error loading XML: {str(e)}")
+            st.stop()
+    else:
+        st.warning("⬆️ Please upload an XML file to continue")
+        st.stop()
 
 # ================================
 # Parse & Index by ObjectID
 # ================================
-@st.cache_data
-def build_diagnostic_index():
+def build_diagnostic_index(root):
     """Build a comprehensive index linking ObjectIDs across all three sections"""
     index = {
-        'data_objects': {},      # ObjectID -> DataObject info
-        'exceptions': {},        # ObjectID -> Exception/Fault info
-        'metadata': {},          # ObjectID -> Hardware/Firmware info
+        'data_objects': {},
+        'exceptions': {},
+        'metadata': {},
         'bus_types': set(),
         'manufacturers': set(),
-        'flash_codes': {},       # FlashCode -> ObjectID
+        'flash_codes': {},
         'severity_levels': set()
     }
     
-    # Index DataObjects (Performance/Signals)
+    # Index DataObjects
     for elem in root.xpath('.//DataObjects'):
         obj_id = elem.get('ObjectID')
         if obj_id:
             index['data_objects'][obj_id] = {
                 'description': elem.get('Description', ''),
                 'unit_text': elem.get('UnitText', ''),
-                'element': elem
             }
     
-    # Index ExceptionMetadata (Faults/Flash Codes)
+    # Index ExceptionMetadata
     for elem in root.xpath('.//ExceptionMetadata'):
         obj_id = elem.get('ObjectID')
         if obj_id:
@@ -83,7 +95,6 @@ def build_diagnostic_index():
                 'corrective_action': elem.get('CorrectiveAction', ''),
                 'flash_code': flash_code,
                 'severity': severity,
-                'element': elem
             }
             
             if flash_code:
@@ -91,7 +102,7 @@ def build_diagnostic_index():
             if severity:
                 index['severity_levels'].add(severity)
     
-    # Index DataPointMetadata (Hardware/Firmware)
+    # Index DataPointMetadata
     for elem in root.xpath('.//DataPointMetadata'):
         obj_id = elem.get('ObjectID')
         if obj_id:
@@ -102,7 +113,6 @@ def build_diagnostic_index():
                 'manufacturer': manufacturer,
                 'firmware': elem.get('FirmwareVersion', ''),
                 'bus_type': bus_type,
-                'element': elem
             }
             
             if bus_type:
@@ -111,6 +121,14 @@ def build_diagnostic_index():
                 index['manufacturers'].add(manufacturer)
     
     return index
+
+# Build index if not already done
+if st.session_state.diag_index is None and st.session_state.root is not None:
+    with st.spinner("📊 Indexing diagnostic data by ObjectID..."):
+        st.session_state.diag_index = build_diagnostic_index(st.session_state.root)
+
+diag_index = st.session_state.diag_index
+root = st.session_state.root
 
 # ================================
 # Optional AI Integration
@@ -124,9 +142,8 @@ try:
         from groq import Groq
         client = Groq(api_key=GROQ_API_KEY)
         USE_AI = True
-        st.sidebar.success("🤖 AI Mode: Enabled")
-except Exception as e:
-    st.sidebar.info("🔍 Search Mode: Basic XPath")
+except:
+    pass
 
 def ask_ai_about_diagnostic(object_id, question):
     """Use AI to provide more detailed analysis"""
@@ -169,9 +186,6 @@ Provide a clear, practical answer."""
         return chat.choices[0].message.content
     except:
         return None
-
-with st.spinner("📊 Indexing diagnostic data by ObjectID..."):
-    diag_index = build_diagnostic_index()
 
 # ================================
 # Diagnostic Query Functions
@@ -329,7 +343,6 @@ def handle_query(question):
     # Manufacturer search
     if "manufacturer" in q_lower or "cummins" in q_lower or "clever" in q_lower:
         search_term = q_lower.replace("manufacturer", "").strip()
-        # Extract manufacturer name
         for manufacturer in diag_index['manufacturers']:
             if search_term in manufacturer.lower() or manufacturer.lower() in search_term:
                 obj_ids = get_by_manufacturer(manufacturer)
@@ -357,7 +370,6 @@ def handle_query(question):
     
     # Try AI for complex questions
     if USE_AI and any(word in q_lower for word in ["why", "how", "what should", "explain", "help", "troubleshoot"]):
-        # Try to find relevant ObjectID first
         for term in search_terms:
             obj_ids = search_by_description(term)
             if obj_ids:
@@ -368,9 +380,8 @@ def handle_query(question):
     return "❌ Query not understood. Try: 'How many bus types?' or 'Show ObjectID 12345' or 'Flash code 523'", "error"
 
 # ================================
-# Streamlit UI
+# Main UI (only if XML loaded)
 # ================================
-st.title("🚗 Vehicle Diagnostic System Query")
 st.markdown("**Search vehicle performance data, faults, and hardware info using ObjectID**")
 
 # Sidebar
@@ -382,6 +393,21 @@ with st.sidebar:
     st.metric("Bus Types", len(diag_index['bus_types']))
     st.metric("Manufacturers", len(diag_index['manufacturers']))
     
+    if USE_AI:
+        st.success("🤖 AI Mode: Enabled")
+    else:
+        st.info("🔍 Search Mode: XPath")
+    
+    st.markdown("---")
+    
+    # Add reload button
+    if st.button("🔄 Load New XML File", use_container_width=True):
+        st.session_state.xml_loaded = False
+        st.session_state.root = None
+        st.session_state.diag_index = None
+        st.session_state.history = []
+        st.rerun()
+    
     st.markdown("---")
     st.header("💡 Example Queries")
     
@@ -392,13 +418,13 @@ with st.sidebar:
         "Search for engine oil pressure",
         "Search for brake",
         "Flash code 523",
-        "What manufacturers are in the system?",
-        "Why would engine oil pressure be low? (AI)" if USE_AI else None,
-        "How do I troubleshoot brake issues? (AI)" if USE_AI else None
     ]
     
-    # Filter out None values
-    examples = [e for e in examples if e]
+    if USE_AI:
+        examples.extend([
+            "Why would engine oil pressure be low? (AI)",
+            "How do I troubleshoot brake issues? (AI)"
+        ])
     
     for example in examples:
         if st.button(example, key=example, use_container_width=True):
@@ -407,14 +433,6 @@ with st.sidebar:
     
     st.markdown("---")
     st.info("💡 **Tip:** Use ObjectID to link signals → faults → hardware")
-
-# Initialize session state
-if 'history' not in st.session_state:
-    st.session_state.history = []
-if 'query' not in st.session_state:
-    st.session_state.query = ''
-if 'should_search' not in st.session_state:
-    st.session_state.should_search = False
 
 # Main query interface
 col1, col2 = st.columns([3, 1])
