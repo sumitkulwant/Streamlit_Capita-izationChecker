@@ -72,7 +72,8 @@ def build_diagnostic_index(root):
         'bus_types': set(),
         'manufacturers': set(),
         'flash_codes': {},
-        'severity_levels': set()
+        'severity_levels': set(),
+        'objectid_to_bustypes': {}  # NEW: Map ObjectID -> list of bus types
     }
     
     # Index DataObjects
@@ -109,11 +110,21 @@ def build_diagnostic_index(root):
             manufacturer = elem.get('ManufacturerAndModel', '')
             bus_type = elem.get('BusType', '')
             
-            index['metadata'][obj_id] = {
+            # NEW: Track bus types per ObjectID
+            if obj_id not in index['objectid_to_bustypes']:
+                index['objectid_to_bustypes'][obj_id] = []
+            if bus_type:
+                index['objectid_to_bustypes'][obj_id].append(bus_type)
+            
+            # Store metadata (may have multiple entries per ObjectID)
+            if obj_id not in index['metadata']:
+                index['metadata'][obj_id] = []
+            
+            index['metadata'][obj_id].append({
                 'manufacturer': manufacturer,
                 'firmware': elem.get('FirmwareVersion', ''),
                 'bus_type': bus_type,
-            }
+            })
             
             if bus_type:
                 index['bus_types'].add(bus_type)
@@ -196,9 +207,14 @@ def get_complete_diagnostic(object_id):
         'object_id': object_id,
         'data_object': diag_index['data_objects'].get(object_id),
         'exception': diag_index['exceptions'].get(object_id),
-        'metadata': diag_index['metadata'].get(object_id)
+        'metadata': diag_index['metadata'].get(object_id, []),  # Now a list
+        'bus_types': diag_index['objectid_to_bustypes'].get(object_id, [])
     }
     return result
+
+def get_bus_types_for_objectid(object_id):
+    """Get all bus types associated with a specific ObjectID"""
+    return diag_index['objectid_to_bustypes'].get(object_id, [])
 
 def search_by_description(search_term):
     """Search in DataObject descriptions"""
@@ -215,17 +231,29 @@ def search_by_flash_code(flash_code):
 def get_by_manufacturer(manufacturer):
     """Get all ObjectIDs for a specific manufacturer"""
     results = []
-    for obj_id, data in diag_index['metadata'].items():
-        if manufacturer.lower() in data['manufacturer'].lower():
-            results.append(obj_id)
+    for obj_id, meta_list in diag_index['metadata'].items():
+        if isinstance(meta_list, list):
+            for meta in meta_list:
+                if manufacturer.lower() in meta['manufacturer'].lower():
+                    results.append(obj_id)
+                    break
+        else:
+            if manufacturer.lower() in meta_list['manufacturer'].lower():
+                results.append(obj_id)
     return results
 
 def get_by_bus_type(bus_type):
     """Get all ObjectIDs using a specific BusType"""
     results = []
-    for obj_id, data in diag_index['metadata'].items():
-        if data['bus_type'] == bus_type:
-            results.append(obj_id)
+    for obj_id, meta_list in diag_index['metadata'].items():
+        if isinstance(meta_list, list):
+            for meta in meta_list:
+                if meta['bus_type'] == bus_type:
+                    results.append(obj_id)
+                    break
+        else:
+            if meta_list['bus_type'] == bus_type:
+                results.append(obj_id)
     return results
 
 def format_diagnostic_report(object_id):
@@ -254,14 +282,35 @@ def format_diagnostic_report(object_id):
     else:
         report += "### ⚠️ Diagnostic Information\n❌ No exception data found\n\n"
     
-    # Section 3: Hardware/Firmware
+    # Section 3: Hardware/Firmware (may have multiple entries)
     if diag['metadata']:
         report += "### 🔧 Hardware & Firmware\n"
-        report += f"**Manufacturer & Model:** {diag['metadata']['manufacturer']}\n\n"
-        if diag['metadata']['firmware']:
-            report += f"**Firmware Version:** `{diag['metadata']['firmware']}`\n\n"
-        if diag['metadata']['bus_type']:
-            report += f"**Bus Type:** {diag['metadata']['bus_type']}\n\n"
+        
+        # Show bus types summary
+        if diag['bus_types']:
+            unique_bus_types = sorted(set(diag['bus_types']))
+            report += f"**Bus Types ({len(unique_bus_types)}):** {', '.join(unique_bus_types)}\n\n"
+        
+        # Show all metadata entries
+        if isinstance(diag['metadata'], list):
+            for i, meta in enumerate(diag['metadata'][:10], 1):  # Limit to 10
+                report += f"**Configuration {i}:**\n"
+                report += f"- Manufacturer: {meta['manufacturer']}\n"
+                if meta['firmware']:
+                    report += f"- Firmware: `{meta['firmware']}`\n"
+                if meta['bus_type']:
+                    report += f"- Bus Type: {meta['bus_type']}\n"
+                report += "\n"
+            
+            if len(diag['metadata']) > 10:
+                report += f"... and {len(diag['metadata']) - 10} more configurations\n\n"
+        else:
+            # Old format (single entry)
+            report += f"**Manufacturer & Model:** {diag['metadata']['manufacturer']}\n\n"
+            if diag['metadata']['firmware']:
+                report += f"**Firmware Version:** `{diag['metadata']['firmware']}`\n\n"
+            if diag['metadata']['bus_type']:
+                report += f"**Bus Type:** {diag['metadata']['bus_type']}\n\n"
     else:
         report += "### 🔧 Hardware & Firmware\n❌ No metadata found\n\n"
     
@@ -278,9 +327,20 @@ def handle_query(question):
     
     # Stats queries
     if "how many" in q_lower:
+        # Check if asking about a specific ObjectID
+        obj_id_match = re.search(r'objectid[:\s]+(\d+)', q_lower)
+        if obj_id_match:
+            obj_id = obj_id_match.group(1)
+            bus_types = get_bus_types_for_objectid(obj_id)
+            if bus_types:
+                unique_bus_types = sorted(set(bus_types))
+                return f"✅ ObjectID **{obj_id}** has **{len(unique_bus_types)}** bus types: {', '.join(unique_bus_types)}", "success"
+            else:
+                return f"❌ ObjectID {obj_id} not found or has no bus types", "error"
+        
         if "bus type" in q_lower or "bustype" in q_lower:
             count = len(diag_index['bus_types'])
-            return f"✅ Found **{count}** unique Bus Types: {', '.join(sorted(diag_index['bus_types']))}", "success"
+            return f"✅ Found **{count}** unique Bus Types in total: {', '.join(sorted(diag_index['bus_types']))}", "success"
         
         if "manufacturer" in q_lower:
             count = len(diag_index['manufacturers'])
@@ -413,8 +473,10 @@ with st.sidebar:
     
     examples = [
         "How many bus types are present?",
+        "How many bus types has ObjectID 1073849379?",
         "List all manufacturers",
         "Show bus type 38",
+        "Show ObjectID 1073849379",
         "Search for engine oil pressure",
         "Search for brake",
         "Flash code 523",
