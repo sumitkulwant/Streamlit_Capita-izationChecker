@@ -112,6 +112,64 @@ def build_diagnostic_index():
     
     return index
 
+# ================================
+# Optional AI Integration
+# ================================
+USE_AI = False
+client = None
+
+try:
+    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+    if GROQ_API_KEY:
+        from groq import Groq
+        client = Groq(api_key=GROQ_API_KEY)
+        USE_AI = True
+        st.sidebar.success("🤖 AI Mode: Enabled")
+except Exception as e:
+    st.sidebar.info("🔍 Search Mode: Basic XPath")
+
+def ask_ai_about_diagnostic(object_id, question):
+    """Use AI to provide more detailed analysis"""
+    if not USE_AI or not client:
+        return None
+    
+    try:
+        diag = get_complete_diagnostic(object_id)
+        
+        context = f"""
+ObjectID: {object_id}
+
+Signal: {diag['data_object'].get('description', 'N/A') if diag['data_object'] else 'N/A'}
+Unit: {diag['data_object'].get('unit_text', 'N/A') if diag['data_object'] else 'N/A'}
+
+Corrective Action: {diag['exception'].get('corrective_action', 'N/A') if diag['exception'] else 'N/A'}
+Flash Code: {diag['exception'].get('flash_code', 'N/A') if diag['exception'] else 'N/A'}
+Severity: {diag['exception'].get('severity', 'N/A') if diag['exception'] else 'N/A'}
+
+Manufacturer: {diag['metadata'].get('manufacturer', 'N/A') if diag['metadata'] else 'N/A'}
+Firmware: {diag['metadata'].get('firmware', 'N/A') if diag['metadata'] else 'N/A'}
+Bus Type: {diag['metadata'].get('bus_type', 'N/A') if diag['metadata'] else 'N/A'}
+"""
+        
+        prompt = f"""You are a vehicle diagnostic expert. Based on this diagnostic data:
+
+{context}
+
+Question: {question}
+
+Provide a clear, practical answer."""
+        
+        chat = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=500
+        )
+        
+        return chat.choices[0].message.content
+    except:
+        return None
+
 with st.spinner("📊 Indexing diagnostic data by ObjectID..."):
     diag_index = build_diagnostic_index()
 
@@ -297,6 +355,16 @@ def handle_query(question):
                     result += f"\n... and {len(obj_ids) - 5} more. Try 'ObjectID {obj_ids[5]}' for details."
                 return result, "info"
     
+    # Try AI for complex questions
+    if USE_AI and any(word in q_lower for word in ["why", "how", "what should", "explain", "help", "troubleshoot"]):
+        # Try to find relevant ObjectID first
+        for term in search_terms:
+            obj_ids = search_by_description(term)
+            if obj_ids:
+                ai_response = ask_ai_about_diagnostic(obj_ids[0], question)
+                if ai_response:
+                    return f"🤖 **AI Analysis:**\n\n{ai_response}\n\n---\n\n**Related ObjectID:** {obj_ids[0]}", "success"
+    
     return "❌ Query not understood. Try: 'How many bus types?' or 'Show ObjectID 12345' or 'Flash code 523'", "error"
 
 # ================================
@@ -324,8 +392,13 @@ with st.sidebar:
         "Search for engine oil pressure",
         "Search for brake",
         "Flash code 523",
-        "What manufacturers are in the system?"
+        "What manufacturers are in the system?",
+        "Why would engine oil pressure be low? (AI)" if USE_AI else None,
+        "How do I troubleshoot brake issues? (AI)" if USE_AI else None
     ]
+    
+    # Filter out None values
+    examples = [e for e in examples if e]
     
     for example in examples:
         if st.button(example, key=example, use_container_width=True):
