@@ -1,168 +1,160 @@
 import streamlit as st
 from lxml import etree
 import re
+import os
 from collections import defaultdict
 
 # ================================
-# Page Configuration
+# Page Config
 # ================================
-st.set_page_config(page_title="Vehicle Diagnostic AI", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="Vehicle Diagnostic System", page_icon="🚗", layout="wide")
 
 # ================================
-# Session State Initialization
+# Initialize Session State
 # ================================
 if 'diag_index' not in st.session_state:
     st.session_state.diag_index = None
-if 'history' not in st.session_state:
-    st.session_state.history = []
 
 # ================================
-# Core Logic: XML Indexing
+# Helper Functions
 # ================================
-def build_index(file):
-    """Parses XML and builds a fast lookup dictionary."""
+def build_diagnostic_index(uploaded_file):
+    """Builds the index once and stores it in session state"""
     try:
-        tree = etree.parse(file)
+        tree = etree.parse(uploaded_file)
         root = tree.getroot()
         
         index = {
-            'objects': {},      # ObjectID -> Description
-            'exceptions': {},   # ObjectID -> Fault Info
-            'metadata': defaultdict(list), # ObjectID -> [Hardware Info]
+            'data_objects': {},
+            'exceptions': {},
+            'metadata': defaultdict(list),
             'bus_types': set(),
             'manufacturers': set(),
-            'flash_to_id': {}
+            'flash_codes': {}
         }
 
-        # 1. Index DataObjects (Signals)
         for elem in root.xpath('.//DataObjects'):
-            oid = elem.get('ObjectID')
-            if oid:
-                index['objects'][oid] = {
-                    'name': elem.get('Name', ''),
-                    'desc': elem.get('Description', ''),
-                    'unit': elem.get('UnitText', '')
+            obj_id = elem.get('ObjectID')
+            if obj_id:
+                index['data_objects'][obj_id] = {
+                    'description': elem.get('Description', ''),
+                    'unit_text': elem.get('UnitText', ''),
                 }
 
-        # 2. Index Exceptions (Faults)
         for elem in root.xpath('.//ExceptionMetadata'):
-            oid = elem.get('ObjectID')
-            if oid:
-                index['exceptions'][oid] = {
-                    'action': elem.get('CorrectiveAction', ''),
-                    'flash': elem.get('FlashCode', ''),
-                    'severity': elem.get('SeverityID', '')
+            obj_id = elem.get('ObjectID')
+            if obj_id:
+                index['exceptions'][obj_id] = {
+                    'corrective_action': elem.get('CorrectiveAction', ''),
+                    'flash_code': elem.get('FlashCode', ''),
+                    'severity': elem.get('SeverityID', ''),
                 }
                 if elem.get('FlashCode'):
-                    index['flash_to_id'][elem.get('FlashCode')] = oid
+                    index['flash_codes'][elem.get('FlashCode')] = obj_id
 
-        # 3. Index Metadata (Hardware)
         for elem in root.xpath('.//DataPointMetadata'):
-            oid = elem.get('ObjectID')
-            bt = elem.get('BusType', '')
-            mf = elem.get('ManufacturerAndModel', '')
-            if oid:
-                index['metadata'][oid].append({
-                    'bus_type': bt,
-                    'mfg': mf,
-                    'fw': elem.get('FirmwareVersion', '')
+            obj_id = elem.get('ObjectID')
+            if obj_id:
+                bus_type = elem.get('BusType', '')
+                mfg = elem.get('ManufacturerAndModel', '')
+                index['metadata'][obj_id].append({
+                    'manufacturer': mfg,
+                    'firmware': elem.get('FirmwareVersion', ''),
+                    'bus_type': bus_type,
                 })
-                if bt: index['bus_types'].add(bt)
-                if mf: index['manufacturers'].add(mf)
+                if bus_type: index['bus_types'].add(bus_type)
+                if mfg: index['manufacturers'].add(mfg)
         
         return index
     except Exception as e:
-        st.error(f"XML Error: {e}")
+        st.error(f"Error indexing XML: {e}")
         return None
 
-# ================================
-# Conversational Query Handler
-# ================================
-def process_chat(query, index):
-    q = query.lower().strip()
+def format_report(obj_id, index):
+    """Restored the detailed report formatting you liked"""
+    if obj_id not in index['data_objects'] and obj_id not in index['metadata']:
+        return f"❌ ObjectID **{obj_id}** not found.", "error"
     
-    # 1. Greetings
-    if q in ['hi', 'hello', 'hey', 'help']:
-        return "👋 **Hello!** I'm your Diagnostic Assistant. Ask me about **ObjectIDs**, **Bus Types**, or search for symptoms like **'Brake'** or **'Engine'**."
+    data = index['data_objects'].get(obj_id, {})
+    exc = index['exceptions'].get(obj_id, {})
+    meta = index['metadata'].get(obj_id, [])
 
-    # 2. "How many" Queries
-    if "how many" in q or "count" in q:
-        if "bus type" in q or "bustype" in q:
-            # Check for specific ObjectID within the "how many" query
-            id_match = re.search(r'(\d{4,})', q)
-            if id_match:
-                oid = id_match.group(1)
-                bts = {m['bus_type'] for m in index['metadata'].get(oid, []) if m['bus_type']}
-                return f"✅ ObjectID **{oid}** uses **{len(bts)}** unique Bus Types: `{', '.join(sorted(bts))}`" if bts else f"❌ No Bus Types found for ID {oid}."
-            return f"✅ There are **{len(index['bus_types'])}** unique Bus Types in this file: `{', '.join(sorted(index['bus_types']))}`"
-        
-        if "manufacturer" in q:
-            return f"✅ Total unique manufacturers: **{len(index['manufacturers'])}**."
-
-    # 3. Direct ID Lookup
-    id_match = re.search(r'(\d{5,})', q)
-    if id_match:
-        oid = id_match.group(1)
-        if oid in index['objects'] or oid in index['metadata']:
-            res = f"### 🔍 Report for ObjectID: {oid}\n\n"
-            # Signal Info
-            obj = index['objects'].get(oid, {})
-            res += f"**Description:** {obj.get('desc', 'N/A')}\n\n"
-            # Fault Info
-            exc = index['exceptions'].get(oid, {})
-            if exc:
-                res += f"⚠️ **Fault Info:** {exc['action']} (Flash: `{exc['flash']}`)\n\n"
-            # Hardware Info
-            meta = index['metadata'].get(oid, [])
-            if meta:
-                res += "**🔧 Associated Hardware:**\n"
-                for m in meta[:5]:
-                    res += f"- {m['mfg']} (Bus: {m['bus_type']})\n"
-            return res
-        return f"❌ ObjectID **{oid}** not found in the database."
-
-    # 4. Keyword Search (Symptoms)
-    search_words = [w for w in q.split() if len(w) > 3 and w not in ['show', 'find', 'search']]
-    if search_words:
-        term = search_words[0]
-        matches = [oid for oid, data in index['objects'].items() if term in data['desc'].lower()]
-        if matches:
-            res = f"🔍 Found **{len(matches)}** results for '{term}':\n\n"
-            for oid in matches[:5]:
-                res += f"- **ID {oid}**: {index['objects'][oid]['desc']}\n"
-            return res
-
-    return "❌ I didn't quite get that. Try asking 'How many bus types?' or enter an ObjectID like '2000275'."
+    report = f"## 🔍 Diagnostic Report for ObjectID: **{obj_id}**\n\n"
+    report += f"### 📊 Signal Description\n**Description:** {data.get('description', 'N/A')}\n"
+    report += f"**Unit:** {data.get('unit_text', 'N/A')}\n\n"
+    
+    if exc:
+        report += "### ⚠️ Diagnostic Information\n"
+        report += f"**Corrective Action:** {exc.get('corrective_action', 'N/A')}\n"
+        report += f"**Flash Code:** `{exc.get('flash_code', 'N/A')}` | **Severity:** {exc.get('severity', 'N/A')}\n\n"
+    
+    if meta:
+        report += "### 🔧 Hardware & Firmware\n"
+        for i, m in enumerate(meta[:5], 1):
+            report += f"{i}. **{m['manufacturer']}** (Firmware: `{m['firmware']}` | Bus: {m['bus_type']})\n"
+    
+    return report, "info"
 
 # ================================
-# Main User Interface
+# Main UI Logic
 # ================================
-st.title("🚗 XML Diagnostic Chatbot")
+st.title("🚗 Vehicle Diagnostic System Query")
 
-uploaded_file = st.sidebar.file_uploader("Upload data_dictionary.xml", type="xml")
+# File Upload (Always check if index exists)
+if st.session_state.diag_index is None:
+    uploaded_file = st.file_uploader("Upload data_dictionary.xml", type=['xml'])
+    if uploaded_file:
+        with st.spinner("🔄 Indexing Data..."):
+            st.session_state.diag_index = build_diagnostic_index(uploaded_file)
+            st.rerun()
+    st.stop()
 
-if uploaded_file:
-    if st.session_state.diag_index is None:
-        st.session_state.diag_index = build_index(uploaded_file)
+# Short reference
+index = st.session_state.diag_index
+
+# --- Sidebar Metrics (Older UI Style) ---
+with st.sidebar:
+    st.header("📊 System Overview")
+    st.metric("Signals", len(index['data_objects']))
+    st.metric("Flash Codes", len(index['flash_codes']))
+    st.metric("Bus Types", len(index['bus_types']))
     
-    index = st.session_state.diag_index
-    
-    # Simple Stats Bar
-    cols = st.columns(3)
-    cols[0].metric("Signals", len(index['objects']))
-    cols[1].metric("Bus Types", len(index['bus_types']))
-    cols[2].metric("Manufacturers", len(index['manufacturers']))
+    if st.button("🔄 Clear & Load New File"):
+        st.session_state.diag_index = None
+        st.rerun()
 
-    # Chat Input
-    user_input = st.chat_input("Ask about an ObjectID, Bus Type, or symptom...")
-    
-    if user_input:
-        response = process_chat(user_input, index)
-        st.session_state.history.append({"q": user_input, "a": response})
+# --- Search Interface ---
+query = st.text_input("Ask about an ObjectID, Bus Type, or Symptom:", placeholder="e.g. 2000275 or 'Brake'")
 
-    # Display Chat History
-    for chat in reversed(st.session_state.history):
-        with st.chat_message("user"): st.write(chat['q'])
-        with st.chat_message("assistant"): st.markdown(chat['a'])
-else:
-    st.info("Please upload the XML file in the sidebar to start.")
+if query:
+    q_lower = query.lower().strip()
+    
+    # Greeting handling
+    if q_lower in ['hi', 'hello', 'hey']:
+        st.info("👋 Hello! Enter an ObjectID or keyword to get started.")
+    
+    # Stats: How many bus types
+    elif "how many" in q_lower and ("bus" in q_lower or "bustype" in q_lower):
+        id_match = re.search(r'(\d{5,})', q_lower)
+        if id_match:
+            oid = id_match.group(1)
+            bts = {m['bus_type'] for m in index['metadata'].get(oid, []) if m['bus_type']}
+            st.success(f"✅ ObjectID **{oid}** has **{len(bts)}** unique bus types: `{', '.join(sorted(bts))}`")
+        else:
+            st.success(f"✅ Total unique Bus Types in system: **{len(index['bus_types'])}**")
+
+    # ID Lookup
+    elif re.search(r'(\d{5,})', q_lower):
+        oid = re.search(r'(\d{5,})', q_lower).group(1)
+        report, status = format_report(oid, index)
+        st.info(report)
+
+    # Keyword Search
+    else:
+        results = [oid for oid, d in index['data_objects'].items() if q_lower in d['description'].lower()]
+        if results:
+            st.write(f"🔍 Found {len(results)} matches:")
+            for oid in results[:5]:
+                st.write(f"- **ID {oid}**: {index['data_objects'][oid]['description']}")
+        else:
+            st.error("❌ No matches found. Try searching for a specific ObjectID.")
