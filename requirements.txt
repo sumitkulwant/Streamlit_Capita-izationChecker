@@ -1,3 +1,4 @@
 streamlit>=1.31.0
 lxml>=5.1.0
 groq>=0.11.0
+ollama
